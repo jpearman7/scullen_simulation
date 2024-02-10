@@ -1,0 +1,285 @@
+---
+title: "scullen_jp"
+author: "Joshua Pearman"
+date: "2/13/2022"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+  pdf_document: 
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Libraries
+
+```{r setup, include=FALSE}
+
+set.seed(123)
+
+
+library(tidyverse)
+library(ggplot2)
+
+```
+
+# Create dataframe with all 80 Simulation Conditions
+
+```{r}
+parameters <- expand.grid(validity = c(0.3, 0.5), 
+                          selection_ratio = c(0.1,0.33), 
+                          turnover = seq(from = 0, to = 0.20, by = 0.05),
+                          firePerc = c(0.05, 0.10), 
+                          reliability = c(0.5, 0.7))
+```
+
+# Create function based on Scullen to apply simulation across 100 organizations
+
+```{r}
+fdrs_full <- function(validity, selection_ratio, turnover, firePerc, reliability) {
+  # Initialize group
+  g <- 1 
+  
+  # Max number of orgs
+  gmax <- 100
+  
+  # Define final returned dataframe
+  all_orgoutputs<- data.frame(matrix(ncol = 3, nrow = 1)) 
+  names(all_orgoutputs) <- c("OrgId", "Year", "MeanPotent")
+  
+  #Define dataframe to track each org's output
+  org_transit <- data.frame(matrix(ncol = 3, nrow = 1))
+  names(org_transit) <- c("OrgId", "Year", "MeanPotent")
+  for (g in 1:gmax){
+   
+    # Step 1: Initialize Time Clock
+    t <- 0 
+    
+    # Step 13: Maximum Time
+    tmax <- 30 
+    
+    # Step 2: Generate dataframe of employees
+    org <- data.frame(potScore = rnorm(n = 100, mean = 0, sd = 1)) %>% 
+      mutate(appScore = validity * potScore + sqrt(1-validity)^2*rnorm(1)) 
+    #print(mean(org$potScore))
+
+    for(t in 1:tmax){
+      # Step 4: Time clock increments by 1
+      org <- org %>% 
+        
+        # Step 3 & 5: Create and invoke voluntary turnover 
+        slice_sample(n = (1-turnover)*nrow(org)) 
+      
+      # Make new df with candidates for turnover
+      replace_turn <- data.frame(potScore = rnorm(n = 100-(100*(1-turnover)))) %>% 
+        mutate(appScore = validity * potScore + sqrt(1-validity)^2*rnorm(1))
+      
+      org <- bind_rows(org, replace_turn) 
+      org %>% 
+        # Step 6: Evaluate employees
+        mutate(rating = potScore * sqrt(reliability) + rnorm(1)*sqrt(1-reliability)) %>%  
+        
+        # Step 7: Rank employees
+        arrange(desc(rating)) %>% 
+        # Step 8: Fire percentage of lowest performing employees
+        slice_head(n = (1-firePerc)*nrow(org))
+      
+      job_applicants <- (1/selection_ratio)*(100-nrow(org)) 
+      
+     # Step 9: Generate new applicants
+     new_app <- data.frame(potScore = rnorm(n = job_applicants, mean = 0, sd = 1)) %>% 
+       mutate(appScore = validity * potScore + sqrt(1-validity)^2*rnorm(1)) %>%
+       
+       # Step 10: Evaluate new applicants
+       mutate(rating = potScore * sqrt(reliability) + rnorm(1)*sqrt(1-reliability)) %>% 
+       
+       # Step 11: Rank new applicants
+       arrange(desc(appScore)) %>% 
+       slice_head(n = 100 - nrow(org))
+      # Step 12: Hire best new applicants for open positions
+      org <- bind_rows(org, new_app) %>% 
+        select(potScore, appScore)
+      #print(mean(org$potScore))
+      
+      org_transit[t, "OrgId"] <- g
+      org_transit[t,"Year"] <- t
+      org_transit[t, "MeanPotent"] <- mean(org$potScore)
+      org_transit[t, "Validity"] <- validity
+      org_transit[t, "SelectionRatio"] <- selection_ratio 
+      org_transit[t, "Turnover"] <- turnover
+      org_transit[t, "FirePerc"] <- firePerc 
+      org_transit[t, "Reliability"] <- reliability
+      
+      t = t+1
+    }
+    
+    # This binds each org's simulation into a single dataframe
+    all_orgoutputs <- bind_rows(all_orgoutputs, org_transit)
+
+
+
+    if (g %% 1 == 0){
+      message(g)
+      message("processing...")
+    }
+    
+    g = g+1
+  }
+
+  all_orgoutputs
+  
+}
+```
+
+# Run full simulation (100 orgs with 30 simulations each, 80 conditions)
+
+```{r}
+
+system.time(full_test <- pmap(parameters, fdrs_full)) 
+
+data <- bind_rows(full_test)
+
+data$Condition <- paste(data$Validity, data$SelectionRatio, data$Turnover, data$FirePerc, data$Reliability)
+
+write.csv(data, "fdrs_data.csv", row.names = F)
+
+
+```
+
+# Summarize outputted data
+
+```{r}
+grouped_data <- data %>% 
+  mutate(ConditionID = group_indices(., Condition)) %>% 
+  group_by(Year, ConditionID, Validity, SelectionRatio, Turnover, FirePerc, Reliability) %>% 
+  summarise(Mean = mean(MeanPotent), SD = sd(MeanPotent), .groups = 'drop') %>% 
+  drop_na() %>% 
+  arrange(ConditionID)
+  
+
+write.csv(grouped_data, "fdrs_grouped_data.csv", row.names = F)
+
+```
+
+# Full simulation visual
+
+```{r}
+df <- read.csv("fdrs_grouped_data.csv") 
+
+## full_plot <- ggplot(bind_rows(full_test, .id = "df"),
+##                     aes(Iteration, SDPotent, colour = df)) +
+##   geom_smooth() 
+
+sd_plot <- ggplot(df,
+                    aes(Year, SD, group = ConditionID, color = ConditionID)) +
+  geom_line() +
+  geom_point()
+
+
+sd_plot # Visualization of 30 year change across different orgs
+
+mean_plot <- ggplot(df,
+                    aes(Year, Mean, group = ConditionID, color = ConditionID)) +
+  geom_line() +
+  geom_point()
+
+
+mean_plot
+
+scenario_79 <- df %>% 
+    filter(
+      Reliability == 0.70,
+      Validity == 0.50, 
+      SelectionRatio == 0.10,
+      FirePerc == 0.1,
+      Turnover == 0.20)
+
+scenario_75 <- df %>% 
+  filter(
+      Reliability ==  0.50,
+      Validity == 0.50 , 
+      SelectionRatio == 0.10 ,
+      FirePerc ==  0.1,
+      Turnover == 0.20
+    )
+
+scenario_39 <- df %>% 
+  filter(
+      Reliability ==  0.70,
+      Validity == 0.50 , 
+      SelectionRatio == 0.10 ,
+      FirePerc ==  0.05,
+      Turnover == 0.20
+    )
+
+scenario_35 <- df %>% 
+  filter(
+      Reliability ==  0.50,
+      Validity == 0.50 , 
+      SelectionRatio == 0.10 ,
+      FirePerc ==  0.05,
+      Turnover == 0.20
+    )
+
+scenario_78 <- df %>% 
+  filter(
+      Reliability ==  0.70,
+      Validity == 0.30 , 
+      SelectionRatio == 0.33,
+      FirePerc ==  0.10,
+      Turnover == 0.20
+    )
+
+scenario_74 <- df %>% 
+  filter(
+      Reliability ==  0.50,
+      Validity == 0.30 , 
+      SelectionRatio == 0.33 ,
+      FirePerc ==  0.10,
+      Turnover == 0.20
+    )
+
+scenario_38 <- df %>% 
+  filter(
+      Reliability ==  0.70,
+      Validity == 0.30 , 
+      SelectionRatio == 0.33 ,
+      FirePerc ==  0.05,
+      Turnover == 0.20
+    )
+
+scenario_34 <- df %>% 
+  filter(
+      Reliability ==  0.50,
+      Validity == 0.30 , 
+      SelectionRatio == 0.33 ,
+      FirePerc ==  0.05,
+      Turnover == 0.20
+    )
+
+fig1_data <- rbind(scenario_34, scenario_35, scenario_38, scenario_39, scenario_74, scenario_75, scenario_78, scenario_79)
+
+
+```
+
+
+# Visual of selected cases
+
+```{r}
+
+fig1_mean <- ggplot(fig1_data,
+                    aes(Year, Mean, group = ConditionID, color = factor(ConditionID))) +
+  geom_line() +
+  geom_point()
+
+fig1_sd <- ggplot(fig1_data,
+                    aes(Year, SD, group = ConditionID, color = factor(ConditionID))) +
+  geom_line() +
+  geom_point()
+
+fig1_mean
+
+fig1_sd
+```
+
